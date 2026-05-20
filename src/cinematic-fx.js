@@ -1,0 +1,273 @@
+/**
+ * cinematic-fx.js — Lead capture popup + cinematic effects
+ * ----------------------------------------------------------------------------
+ * Features:
+ *   1) Lead popup: hiện sau 4s, 24h cookie, Zalo CTA + close
+ *   2) Hero fade+rise on load
+ *   3) Ken Burns zoom cho ảnh listings
+ *   4) Scroll-triggered fade-in cho cards (IntersectionObserver)
+ *   5) Hover 3D tilt cho cards
+ * ----------------------------------------------------------------------------
+ */
+
+const POPUP_DELAY_MS = 7000; // Mềm mại hơn — đợi user xem trang trước
+const POPUP_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h
+const POPUP_KEY = 'hs_popup_dismissed_at';
+
+// Translations cho popup (bypass i18n cache issues — self-contained)
+const POPUP_TEXT = {
+  vi: {
+    badge: '✓ Chính chủ · Miễn phí môi giới',
+    title: 'Cần tư vấn về căn nào?',
+    desc: 'Marshall Ng — chuyên viên BĐS với 5+ năm kinh nghiệm — sẵn sàng hỗ trợ. Không spam, không gọi điện làm phiền.',
+    zalo: 'Nhắn Zalo (miễn phí)',
+    later: 'Tôi tự xem trước',
+    phone_note: '· phản hồi trong 15 phút',
+    close_aria: 'Đóng',
+  },
+  en: {
+    badge: '✓ Direct-owner · No agent fees',
+    title: 'Need advice on a property?',
+    desc: 'Marshall Ng — real estate specialist with 5+ years of experience — is ready to help. No spam, no cold calls.',
+    zalo: 'Message on Zalo (free)',
+    later: 'Let me browse first',
+    phone_note: '· reply within 15 minutes',
+    close_aria: 'Close',
+  },
+  zh: {
+    badge: '✓ 屋主直售 · 免仲介費',
+    title: '需要關於哪一間的諮詢嗎?',
+    desc: 'Marshall Ng — 5年以上經驗的房產專家 — 隨時為您服務。不騷擾、不冷打。',
+    zalo: '透過 Zalo 私訊(免費)',
+    later: '我先自己看看',
+    phone_note: '· 15 分鐘內回覆',
+    close_aria: '關閉',
+  },
+};
+
+function getCurrentLang() {
+  try {
+    const stored = localStorage.getItem('hs_lang');
+    if (stored && POPUP_TEXT[stored]) return stored;
+  } catch {}
+  // Auto-detect from <html lang> or browser
+  const htmlLang = document.documentElement.lang;
+  if (htmlLang?.startsWith('en')) return 'en';
+  if (htmlLang?.startsWith('zh')) return 'zh';
+  return 'vi';
+}
+
+function applyPopupTranslations() {
+  const lang = getCurrentLang();
+  const t = POPUP_TEXT[lang] || POPUP_TEXT.vi;
+  const setEl = (sel, text) => {
+    const el = document.querySelector(sel);
+    if (el) el.textContent = text;
+  };
+  setEl('.lead-popup__badge', t.badge);
+  setEl('.lead-popup__title', t.title);
+  setEl('.lead-popup__desc', t.desc);
+  setEl('.lead-popup__btn--primary span', t.zalo);
+  setEl('.lead-popup__btn--ghost', t.later);
+  // phone_note is in a span inside .lead-popup__phone
+  const phoneNote = document.querySelector('.lead-popup__phone span');
+  if (phoneNote) phoneNote.textContent = ' ' + t.phone_note;
+  const closeBtn = document.querySelector('.lead-popup__close');
+  if (closeBtn) closeBtn.setAttribute('aria-label', t.close_aria);
+}
+
+// ─── 1. Lead capture popup ─────────────────────────────────────────────────
+function shouldShowPopup() {
+  try {
+    const last = Number(localStorage.getItem(POPUP_KEY) || 0);
+    return Date.now() - last > POPUP_COOLDOWN_MS;
+  } catch { return true; }
+}
+
+function showPopup() {
+  const popup = document.getElementById('lead-popup');
+  if (!popup) return;
+  applyPopupTranslations(); // Đảm bảo text đúng ngôn ngữ trước khi show
+  popup.hidden = false;
+  popup.setAttribute('aria-hidden', 'false');
+  // trigger animation next frame
+  requestAnimationFrame(() => popup.classList.add('lead-popup--open'));
+}
+
+function closePopup() {
+  const popup = document.getElementById('lead-popup');
+  if (!popup) return;
+  popup.classList.remove('lead-popup--open');
+  setTimeout(() => {
+    popup.hidden = true;
+    popup.setAttribute('aria-hidden', 'true');
+  }, 300);
+  try { localStorage.setItem(POPUP_KEY, String(Date.now())); } catch {}
+}
+
+function initPopup() {
+  const popup = document.getElementById('lead-popup');
+  if (!popup) return;
+
+  // Apply translations ngay lập tức (kể cả khi popup chưa show)
+  applyPopupTranslations();
+  // Re-apply nếu user đổi ngôn ngữ (lang dropdown click)
+  document.querySelectorAll('[data-lang]').forEach(btn => {
+    btn.addEventListener('click', () => setTimeout(applyPopupTranslations, 50));
+  });
+
+  // Close handlers
+  popup.addEventListener('click', (e) => {
+    if (e.target.matches('[data-popup-close]') || e.target.closest('[data-popup-close]')) {
+      closePopup();
+    }
+  });
+  // Track Zalo click as conversion (still close after)
+  popup.querySelector('.lead-popup__btn--primary')?.addEventListener('click', () => {
+    try { localStorage.setItem(POPUP_KEY, String(Date.now())); } catch {}
+  });
+  // Esc to close
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !popup.hidden) closePopup();
+  });
+
+  if (shouldShowPopup()) {
+    setTimeout(showPopup, POPUP_DELAY_MS);
+  }
+}
+
+// ─── 2. Hero fade+rise on load ─────────────────────────────────────────────
+function initHeroAnimation() {
+  const title = document.querySelector('.hero__title');
+  const subtitle = document.querySelector('.hero__subtitle');
+  if (!title) return;
+
+  [title, subtitle].forEach((el, i) => {
+    if (!el) return;
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(24px)';
+    el.style.transition = 'opacity 0.9s ease-out, transform 0.9s cubic-bezier(0.2, 0.8, 0.2, 1)';
+    setTimeout(() => {
+      el.style.opacity = '1';
+      el.style.transform = 'translateY(0)';
+    }, 100 + i * 200);
+  });
+}
+
+// ─── 3. Scroll-triggered fade-in cho cards ─────────────────────────────────
+function initScrollFadeIn() {
+  if (!('IntersectionObserver' in window)) return;
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('cf-fade-in--visible');
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -50px 0px' });
+
+  // Re-observe on DOM changes (for dynamically added listing cards)
+  function observeCards() {
+    document.querySelectorAll('.card:not(.cf-fade-in)').forEach((card, i) => {
+      card.classList.add('cf-fade-in');
+      card.style.transitionDelay = `${(i % 6) * 60}ms`;
+      observer.observe(card);
+    });
+  }
+
+  observeCards();
+
+  // Watch for new cards added by ui-render.js
+  const grid = document.querySelector('.cards-grid, .listings-grid, [class*="grid"]');
+  if (grid) {
+    new MutationObserver(observeCards).observe(grid, { childList: true, subtree: true });
+  }
+  // Also watch the whole body in case grid selector misses
+  new MutationObserver((mutations) => {
+    if (mutations.some(m => Array.from(m.addedNodes).some(n => n.nodeType === 1 && (n.classList?.contains('listing-card') || n.querySelector?.('.card'))))) {
+      observeCards();
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+}
+
+// ─── 4. Hover 3D tilt cho cards ────────────────────────────────────────────
+function init3DTilt() {
+  // Use event delegation — works for dynamically added cards
+  document.addEventListener('mousemove', (e) => {
+    const card = e.target.closest('.card');
+    if (!card) return;
+    const rect = card.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;  // 0..1
+    const y = (e.clientY - rect.top) / rect.height;  // 0..1
+    const tiltX = (y - 0.5) * -4; // ±2 deg — subtle hơn
+    const tiltY = (x - 0.5) * 4;
+    card.style.transform = `perspective(1100px) rotateX(${tiltX}deg) rotateY(${tiltY}deg) scale(1.01)`;
+    card.style.transition = 'transform 0.08s ease-out';
+  });
+
+  document.addEventListener('mouseleave', (e) => {
+    const card = e.target.closest?.('.card');
+    if (!card) return;
+    card.style.transform = '';
+    card.style.transition = 'transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)';
+  }, true);
+
+  // Reset on mouseout from card
+  document.addEventListener('mouseout', (e) => {
+    const card = e.target.closest?.('.card');
+    if (!card) return;
+    if (!card.contains(e.relatedTarget)) {
+      card.style.transform = '';
+      card.style.transition = 'transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)';
+    }
+  });
+}
+
+// ─── 5. Ken Burns zoom cho ảnh listings ────────────────────────────────────
+function initKenBurns() {
+  // Apply class — CSS handles the slow zoom animation
+  function applyToImages() {
+    document.querySelectorAll('.card img:not(.cf-ken-burns), .card__media img:not(.cf-ken-burns)').forEach(img => {
+      img.classList.add('cf-ken-burns');
+    });
+  }
+  applyToImages();
+  // Re-apply on dynamic content
+  new MutationObserver(applyToImages).observe(document.body, { childList: true, subtree: true });
+}
+
+// ─── INIT ──────────────────────────────────────────────────────────────────
+function init() {
+  initPopup();
+  initHeroAnimation();
+  initScrollFadeIn();
+  init3DTilt();
+  initKenBurns();
+
+  // Failsafe: re-scan cards 3 lần sau khi load (Firebase fetch async, MutationObserver có thể miss)
+  [500, 1500, 3000].forEach(delay => {
+    setTimeout(() => {
+      // Re-trigger fade-in observer
+      document.querySelectorAll('.card:not(.cf-fade-in)').forEach((card, i) => {
+        card.classList.add('cf-fade-in');
+        card.style.transitionDelay = `${(i % 6) * 60}ms`;
+        // If already in viewport, mark visible immediately
+        const rect = card.getBoundingClientRect();
+        if (rect.top < window.innerHeight && rect.bottom > 0) {
+          requestAnimationFrame(() => card.classList.add('cf-fade-in--visible'));
+        }
+      });
+      // Re-apply Ken Burns
+      document.querySelectorAll('.card img:not(.cf-ken-burns), .card__media img:not(.cf-ken-burns)').forEach(img => {
+        img.classList.add('cf-ken-burns');
+      });
+    }, delay);
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
